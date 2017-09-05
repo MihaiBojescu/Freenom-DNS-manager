@@ -30,10 +30,16 @@ class domain:
         self.token = token
 
     def removeOldAddresses(self, session):
+        print("Getting delete URLs...")
+        domainParser = domainDeleterLinkGetter(self)
+        domainParser.feed(session.get(self.manageURL, verify = False).text)
+
+        print("Removing old address records...")
         for deleteURL in self.deleteURLs:
             session.get(deleteURL)
 
     def addCurrentAddress(self, IP, session):
+        print("Adding new address record...")
         newRecord = {
             "token": self.token,
             "dnsaction": "add",
@@ -43,7 +49,6 @@ class domain:
             "addrecord[0][value]": IP
         }
         session.post(self.manageURL, data = newRecord)
-
 
 class domainGetter(HTMLParser):
     def __init__(self):
@@ -109,62 +114,74 @@ def readCredentials():
     }
     return credentials
 
+def readWorkingDomain():
+    workDomain = input("Working domain: ")
+    return workDomain
+
 def getIP():
     return requests.get("https://api.ipify.org/").text
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3:
-        credentials = {
-            "username": sys.argv[1],
-            "password": sys.argv[2]
-        }
-        workDomain = ""
-    elif len(sys.argv) == 4:
-        credentials = {
-            "username": sys.argv[1],
-            "password": sys.argv[2]
-        }
-        workDomain = sys.argv[3]
-    else:
-        credentials = readCredentials()
-        workDomain = ""
+    credentials = {
+        "username": "",
+        "password": ""
+    }
+    workDomain = ""
+    remove = False
+    add = False
 
-    warnings.simplefilter("ignore")
-    session = requests.Session()
-    session.verify = False
+    try:
+        for arg in sys.argv:
+            if arg.find("username=") != -1:
+                credentials["username"] = arg[arg.find("=") + 1:]
+            elif arg.find("password=") != -1:
+                credentials["password"] = arg[arg.find("=") + 1:]
+            elif arg.find("workDomain=") != -1:
+                workDomain = arg[arg.find("=") + 1:]
+            elif arg.find("+remove") != -1:
+                remove = True
+            elif arg.find("+add") != -1:
+                add = True
 
-    IP = getIP()
-    print("Public IP address: " + IP)
+        if credentials["username"] == "":
+            credentials["username"] = input("Username: ")
+        if credentials["password"] == "":
+            credentials["password"] = getpass.getpass("Password: ")
 
-    session.post(LOGIN_URL, data = credentials)
-    response = session.get(DOMAINS_PAGE_URL)
-    domainParser = domainGetter()
-    domainParser.feed(response.text)
-    domainList = domainParser.getDomainList()
+        warnings.simplefilter("ignore")
+        IP = getIP()
+        print("Public IP address: " + IP)
 
-    domainParser = domainDeleterLinkGetter(domain)
-    if workDomain != "":
-        print(' '.join(("Working with domain", workDomain, "...")))
-        for domain in domainList:
-            if domain.domain == workDomain:
-                domainParser = domainDeleterLinkGetter(domain)
-                print("Getting delete URLs...")
-                domainParser.feed(session.get(domain.manageURL, verify = False).text)
-                print("Removing old address records...")
-                domain.removeOldAddresses(session)
-                print("Adding new address record...")
-                domain.addCurrentAddress(IP, session)
-                print("Done")
-                sys.exit()
-        print(''.join(("Working domain (", workDomain, ") not found.")))
-    else:
-        for domain in domainList:
-            print(' '.join(("Working with domain", domain.domain, "...")))
-            domainParser = domainDeleterLinkGetter(domain)
-            print("Getting delete URLs...")
-            domainParser.feed(session.get(domain.manageURL, verify = False).text)
-            print("Removing old address records...")
-            domain.removeOldAddresses(session)
-            print("Adding new address record...")
-            domain.addCurrentAddress(IP, session)
-        print("Done")
+        session = requests.Session()
+        session.verify = False
+        session.post(LOGIN_URL, data = credentials)
+        response = session.get(DOMAINS_PAGE_URL)
+
+        domainParser = domainGetter()
+        domainParser.feed(response.text)
+        domainList = domainParser.getDomainList()
+
+        domainParser = domainDeleterLinkGetter(domain)
+        if workDomain != "":
+            print(''.join(("Working with domain ", workDomain, "...")))
+            for domain in domainList:
+                if domain.domain == workDomain:
+                    if remove:
+                        domain.removeOldAddresses(session)
+                    if add:
+                        domain.addCurrentAddress(IP, session)
+                    print("Done")
+                    sys.exit()
+            print(''.join(("Working domain (", workDomain, ") not found.")))
+
+        else:
+            for domain in domainList:
+                print(' '.join(("Working with domain", domain.domain, "...")))
+                if remove:
+                    domain.removeOldAddresses(session)
+                if add:
+                    domain.addCurrentAddress(IP, session)
+            print("Done")
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt detected.")
