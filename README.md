@@ -1,5 +1,7 @@
 # Freenom DNS manager
-A Freenom DNS manager written in Python.
+A _hacky_ (as in not using the API, but the website itself) Freenom DNS manager written in Python using
+* requests for login, domain page content getter, removing address records and adding address records
+* HTMLParser for parsing the domain pages
 
 ## Usage
 Use freenom-dns-manager with the following args:
