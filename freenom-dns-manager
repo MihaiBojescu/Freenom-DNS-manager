@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import sys
 import json
 import time
+import getpass
 import datetime
 import requests
 from html.parser import HTMLParser
@@ -12,6 +14,8 @@ urls = {
     "MANAGE_DOMAIN_PAGE_URL": "https://my.freenom.com/clientarea.php?managedns=&domainid=",
     "FREENOM_STUB_URL": "https://my.freenom.com/"
 }
+
+timeout = 10
 
 
 class tokenPageParser(HTMLParser):
@@ -99,7 +103,7 @@ class removePageParser(HTMLParser):
             self.itterator += 1
 
         elif tag == "a" and self.itterator % 5 == 0 and self.startOfTable and self.firstTable:
-            self.session.get(urls["FREENOM_STUB_URL"] + attrs[0][1])
+            self.session.get(urls["FREENOM_STUB_URL"] + attrs[0][1], timeout=timeout)
 
     def handle_endtag(self, tag):
         if tag == "tbody":
@@ -115,16 +119,95 @@ def timestampedPrint(str):
     print(' - '.join([datetime.datetime.now().isoformat(), str]))
 
 
-def doLogin():
+def readInputs():
+    inputs = {
+        "username": "",
+        "password": "",
+        "workDomain": "",
+        "remove": False,
+        "add": False,
+        "cron": False,
+        "time": 100
+    }
+
+    try:
+        for arg in sys.argv:
+            if arg.find("username=") != -1:
+                inputs["username"] = arg[arg.find("=") + 1:]
+            elif arg.find("password=") != -1:
+                inputs["password"] = arg[arg.find("=") + 1:]
+            elif arg.find("workDomain=") != -1:
+                inputs["workDomain"] = arg[arg.find("=") + 1:]
+            elif arg.find("+remove") != -1:
+                inputs["remove"] = True
+            elif arg.find("+add") != -1:
+                inputs["add"] = True
+            elif arg.find("+cron") != -1:
+                inputs["cron"] = True
+            elif arg.find("time=") != -1:
+                inputs["time"] = int(arg[arg.find("=") + 1:])
+            elif arg.find("timeout=") != -1:
+                timeout = int(arg[arg.find("=") + 1:])
+
+        if inputs["username"] == "":
+            inputs["username"] = input("Username: ")
+        if inputs["password"] == "":
+            inputs["password"] = getpass.getpass("Password: ")
+            
+        if inputs["add"] == False and inputs["remove"] == False:
+            inputs["add"] = True
+            inputs["remove"] = True
+
+        return inputs
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt detected.")
+
+
+def cron(credentials):
+    currentIp = {"ip": "0.0.0.0"}
+    lastIp = currentIp
+
+    while True:
+        try:
+            timestampedPrint("Different ip")
+            currentIp = json.loads(requests.get("https://api.ipify.org?format=json", timeout=timeout).text)
+
+            if (currentIp["ip"] != lastIp["ip"]):
+                manageDns(credentials, currentIp)
+
+            lastIp = currentIp
+
+        except:
+            timestampedPrint("Can't connect")
+
+        time.sleep(credentials["time"])
+
+
+def noCron(credentials):
+    currentIp = json.loads(requests.get("https://api.ipify.org?format=json", timeout=timeout).text)
+    manageDns(credentials, currentIp)
+
+
+def manageDns(credentials, ip):
+    session = doLogin(credentials)
+    domains = getDomains(session)
+    if (credentials["workDomain"] != ""): domains = [domain for domain in domains if domain["name"] == credentials["workDomain"]]
+    if (credentials["remove"]): removeRecords(session, domains)
+    if (credentials["add"]): appendRecords(session, domains, ip)
+    timestampedPrint("Done")
+
+
+def doLogin(credentials):
     timestampedPrint("Logging in...")
-    html = requests.get(urls["LOGIN_URL"]).text
+    html = requests.get(urls["LOGIN_URL"], timeout=timeout).text
     parser = tokenPageParser()
     parser.feed(html)
 
     user = {
         "token": parser.getToken(),
-        "username": "",
-        "password": ""
+        "username": credentials["username"],
+        "password": credentials["password"]
     }
 
     headers = {
@@ -136,14 +219,14 @@ def doLogin():
     }
 
     session = requests.session()
-    session.post(urls["DO_LOGIN_URL"], headers=headers, data=user)
+    session.post(urls["DO_LOGIN_URL"], headers=headers, data=user, timeout=timeout)
     timestampedPrint("Logged in")
     return session
 
 
 def getDomains(session):
     timestampedPrint("Getting domains...")
-    html = session.get(urls["DOMAINS_PAGE_URL"]).text
+    html = session.get(urls["DOMAINS_PAGE_URL"], timeout=timeout).text
     parser = domainPageParser()
     parser.feed(html)
 
@@ -159,7 +242,7 @@ def removeRecords(session, domains):
     for domain in domains:
         timestampedPrint("For domain " + domain["name"] + "...")
         parser.resetParser()
-        parser.feed(session.get(domain["url"]).text)
+        parser.feed(session.get(domain["url"], timeout=timeout).text)
 
     timestampedPrint("Removed DNS records")
 
@@ -199,22 +282,23 @@ def appendRecords(session, domains, ip):
 
     for domain in domains:
         timestampedPrint("For domain " + domain["name"] + "...")
-        parser.feed(session.get(domain["url"]).text)
+        parser.feed(session.get(domain["url"], timeout=timeout).text)
         headers["referer"] = domain["url"]
         data["token"] = parser.getToken()
-        session.post(domain["url"], headers=headers, data=data)
+        session.post(domain["url"], headers=headers, data=data, timeout=timeout)
 
     timestampedPrint("Appended DNS records")
 
 
 def main():
-    currentIp = json.loads(requests.get(
-        "https://api.ipify.org?format=json", timeout=1).text)
-    session = doLogin()
-    domains = getDomains(session)
-    removeRecords(session, domains)
-    appendRecords(session, domains, currentIp)
-    timestampedPrint("Done")
+    try: 
+        credentials = readInputs()
+        if (credentials["cron"]): cron(credentials)
+        else: noCron(credentials)
+    except KeyboardInterrupt:
+        timestampedPrint("Stopping")
+    except:
+        pass
 
 
 if __name__ == '__main__':
