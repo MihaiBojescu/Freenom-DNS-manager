@@ -1,187 +1,221 @@
 #!/usr/bin/env python3
-import os
-import sys
-import getpass
+import json
+import time
+import datetime
 import requests
-import warnings
 from html.parser import HTMLParser
 
-# URLs
-LOGIN_URL = "https://my.freenom.com/dologin.php"
-DOMAINS_PAGE_URL = "https://my.freenom.com/clientarea.php?action=domains"
-MANAGE_DOMAIN_PAGE_URL = "https://my.freenom.com/clientarea.php?managedns=&domainid="
-FREENOM_STUB_URL = "https://my.freenom.com/"
+urls = {
+    "LOGIN_URL": "https://my.freenom.com/clientarea.php",
+    "DO_LOGIN_URL": "https://my.freenom.com/dologin.php",
+    "DOMAINS_PAGE_URL": "https://my.freenom.com/clientarea.php?action=domains",
+    "MANAGE_DOMAIN_PAGE_URL": "https://my.freenom.com/clientarea.php?managedns=&domainid=",
+    "FREENOM_STUB_URL": "https://my.freenom.com/"
+}
 
-class domain:
-    def __init__(self):
-        self.domain = ""
-        self.id = ""
+
+class tokenPageParser(HTMLParser):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.inForm = False
+        self.shouldContinue = True
         self.token = ""
-        self.manageURL = ""
-        self.deleteURLs = []
 
-    def createManageURL(self):
-        self.manageURL = MANAGE_DOMAIN_PAGE_URL.replace("managedns=", "managedns=" + self.domain).replace("domainid=", "domainid=" + self.id)
+    def handle_starttag(self, tag, attrs):
+        if self.shouldContinue:
+            if tag == "form":
+                self.inForm = True
+            if tag == "input" and attrs[1][1] == "token" and self.inForm:
+                self.token = attrs[2][1]
+                self.shouldContinue = False
 
-    def createDeleteURL(self, url):
-        self.deleteURLs.append(FREENOM_STUB_URL + url)
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.inForm = False
 
-    def createToken(self, token):
-        self.token = token
+    def getToken(self):
+        return self.token
 
-    def removeOldAddresses(self, session):
-        print("Getting delete URLs...")
-        domainParser = domainDeleterLinkGetter(self)
-        domainParser.feed(session.get(self.manageURL, verify = False).text)
 
-        print("Removing old address records...")
-        for deleteURL in self.deleteURLs:
-            session.get(deleteURL)
-
-    def addCurrentAddress(self, IP, session):
-        print("Adding new address record...")
-        newRecord = {
-            "token": self.token,
-            "dnsaction": "add",
-            "addrecord[0][name]": "home",
-            "addrecord[0][type]": "A",
-            "addrecord[0][ttl]": 14440,
-            "addrecord[0][value]": IP
+class domainPageParser(HTMLParser):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.domains = []
+        self.startOfDomains = False
+        self.currentDomain = {}
+        self.itterator = 0
+        self.remainderFunctions = {
+            0: self.setName,
+            1: self.setId,
+            2: self.appendDomain
         }
-        session.post(self.manageURL, data = newRecord)
 
-class domainGetter(HTMLParser):
-    def __init__(self):
-        HTMLParser.__init__(self)
-        self.domainList = list()
-        self.foundDomain = False
-        self.foundDomainID = False
+    def setName(self, attrs):
+        self.currentDomain["name"] = attrs[0][1].replace(
+            "http:", "").replace("/", "")
 
-    def handle_starttag(self, tag, attr):
-        if tag == 'td':
-            for attribute in attr:
-                if attribute[0] == "class" and attribute[1] == "second":
-                    self.currentDomain = domain()
-                    self.foundDomain = True
+    def setId(self, attrs):
+        self.currentDomain["id"] = attrs[1][1][attrs[1][1].rfind("&id=") + 4:]
 
-        elif tag == "a":
-            for attribute in attr:
-                if attribute[0] == "class" and attribute[1] == "smallBtn whiteBtn pullRight":
-                    self.foundDomainID = True
+    def appendDomain(self, attrs):
+        self.currentDomain["url"] = urls["MANAGE_DOMAIN_PAGE_URL"]
+        self.currentDomain["url"] = self.currentDomain["url"].replace(
+            "managedns=", "managedns=" + self.currentDomain["name"])
+        self.currentDomain["url"] = self.currentDomain["url"].replace(
+            "domainid=", "domainid=" + self.currentDomain["id"])
+        self.domains.append(self.currentDomain)
+        self.currentDomain = {}
 
-                elif attribute[0] == "href" and self.foundDomainID == True:
-                    self.currentDomain.id = attribute[1][39:]
-                    self.currentDomain.createManageURL()
-                    self.domainList.append(self.currentDomain)
-                    self.foundDomainID = False
+    def handle_starttag(self, tag, attrs):
+        if tag == "tbody":
+            self.startOfDomains = True
+
+        elif self.startOfDomains == True:
+            if tag == "a":
+                self.remainderFunctions[self.itterator % 3](attrs)
+                self.itterator += 1
+
+    def handle_endtag(self, tag):
+        if tag == "tbody":
+            self.startOfDomains = False
+
+    def getDomains(self):
+        return self.domains
 
 
-    def handle_data(self, data):
-        if self.foundDomain == True:
-            self.currentDomain.domain = data[:-1]
-            self.foundDomain = False
+class removePageParser(HTMLParser):
+    def __init__(self, *args, session):
+        super().__init__(*args)
+        self.startOfTable = False
+        self.firstTable = True
+        self.itterator = 0
+        self.session = session
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tbody" and self.firstTable:
+            self.startOfTable = True
+
+        elif tag == "td" and self.startOfTable and self.firstTable:
+            self.itterator += 1
+
+        elif tag == "a" and self.itterator % 5 == 0 and self.startOfTable and self.firstTable:
+            self.session.get(urls["FREENOM_STUB_URL"] + attrs[0][1])
+
+    def handle_endtag(self, tag):
+        if tag == "tbody":
+            self.startOfTable = False
+            self.firstTable = False
+
+    def resetParser(self):
+        self.firstTable = True
+        self.itterator = 0
 
 
-    def getDomainList(self):
-        return self.domainList
+def timestampedPrint(str):
+    print(' - '.join([datetime.datetime.now().isoformat(), str]))
 
-class domainDeleterLinkGetter(HTMLParser):
-    def __init__(self, domain):
-        HTMLParser.__init__(self)
-        self.domain = domain
 
-    def handle_starttag(self, tag, attr):
-        if tag == "a":
-            for attribute in attr:
-                if attribute[0] == "href":
-                    if attribute[1].find("&dnsaction=delete") != -1 and attribute[1].find("&records=A") != -1:
-                        self.domain.createDeleteURL(attribute[1])
+def doLogin():
+    timestampedPrint("Logging in...")
+    html = requests.get(urls["LOGIN_URL"]).text
+    parser = tokenPageParser()
+    parser.feed(html)
 
-        elif tag == "input":
-            foundToken = False
-            for attribute in attr:
-                if attribute[0] == "name" and attribute[1] == "token":
-                    foundToken = True
-
-                elif attribute[0] == "value" and foundToken == True:
-                    self.domain.createToken(attribute[1])
-                    foundToken = False
-
-def readCredentials():
-    credentials = {
-        "username": input("Username: "),
-        "password": getpass.getpass("Password: ")
-    }
-    return credentials
-
-def readWorkingDomain():
-    workDomain = input("Working domain: ")
-    return workDomain
-
-def getIP():
-    return requests.get("https://api.ipify.org/").text
-
-if __name__ == '__main__':
-    credentials = {
+    user = {
+        "token": parser.getToken(),
         "username": "",
         "password": ""
     }
-    workDomain = ""
-    remove = False
-    add = False
 
-    try:
-        for arg in sys.argv:
-            if arg.find("username=") != -1:
-                credentials["username"] = arg[arg.find("=") + 1:]
-            elif arg.find("password=") != -1:
-                credentials["password"] = arg[arg.find("=") + 1:]
-            elif arg.find("workDomain=") != -1:
-                workDomain = arg[arg.find("=") + 1:]
-            elif arg.find("+remove") != -1:
-                remove = True
-            elif arg.find("+add") != -1:
-                add = True
+    headers = {
+        "Content-type": "application/x-www-form-urlencoded",
+        "Referer": "https://my.freenom.com",
+        "Host": "my.freenom.com",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.84 Safari/537.36"
+    }
 
-        if credentials["username"] == "":
-            credentials["username"] = input("Username: ")
-        if credentials["password"] == "":
-            credentials["password"] = getpass.getpass("Password: ")
+    session = requests.session()
+    session.post(urls["DO_LOGIN_URL"], headers=headers, data=user)
+    timestampedPrint("Logged in")
+    return session
 
-        warnings.simplefilter("ignore")
-        IP = getIP()
-        print("Public IP address: " + IP)
 
-        session = requests.Session()
-        session.verify = False
-        session.post(LOGIN_URL, data = credentials)
-        response = session.get(DOMAINS_PAGE_URL)
+def getDomains(session):
+    timestampedPrint("Getting domains...")
+    html = session.get(urls["DOMAINS_PAGE_URL"]).text
+    parser = domainPageParser()
+    parser.feed(html)
 
-        domainParser = domainGetter()
-        domainParser.feed(response.text)
-        domainList = domainParser.getDomainList()
+    domains = parser.getDomains()
+    timestampedPrint("Got domains")
+    return domains
 
-        domainParser = domainDeleterLinkGetter(domain)
-        if workDomain != "":
-            print(''.join(("Working with domain ", workDomain, "...")))
-            for domain in domainList:
-                if domain.domain == workDomain:
-                    if remove:
-                        domain.removeOldAddresses(session)
-                    if add:
-                        domain.addCurrentAddress(IP, session)
-                    print("Done")
-                    sys.exit()
-            print(''.join(("Working domain (", workDomain, ") not found.")))
 
-        else:
-            for domain in domainList:
-                print(' '.join(("Working with domain", domain.domain, "...")))
-                if remove:
-                    domain.removeOldAddresses(session)
-                if add:
-                    domain.addCurrentAddress(IP, session)
-            print("Done")
+def removeRecords(session, domains):
+    timestampedPrint("Removing DNS records...")
 
-    except KeyboardInterrupt:
-        print("Keyboard interrupt detected.")
+    parser = removePageParser(session=session)
+    for domain in domains:
+        timestampedPrint("For domain " + domain["name"] + "...")
+        parser.resetParser()
+        parser.feed(session.get(domain["url"]).text)
+
+    timestampedPrint("Removed DNS records")
+
+
+def appendRecords(session, domains, ip):
+    timestampedPrint("Appending DNS records...")
+
+    parser = tokenPageParser()
+
+    data = {
+        "dnsaction": "add",
+        "addrecord[0][name]": "",
+        "addrecord[0][type]": "A",
+        "addrecord[0][ttl]": "300",
+        "addrecord[0][value]": str(ip["ip"]),
+        "addrecord[0][priority]": "",
+        "addrecord[0][port]": "",
+        "addrecord[0][weight]": "",
+        "addrecord[0][forward_type]": "1",
+        "addrecord[1][name]": "WWW",
+        "addrecord[1][type]": "A",
+        "addrecord[1][ttl]": "300",
+        "addrecord[1][value]": str(ip["ip"]),
+        "addrecord[1][priority]": "",
+        "addrecord[1][port]": "",
+        "addrecord[1][weight]": "",
+        "addrecord[1][forward_type]": "1",
+    }
+
+    headers = {
+        "Content-type": "application/x-www-form-urlencoded",
+        "Referer": "",
+        "Host": "my.freenom.com",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.84 Safari/537.36"
+    }
+
+    for domain in domains:
+        timestampedPrint("For domain " + domain["name"] + "...")
+        parser.feed(session.get(domain["url"]).text)
+        headers["referer"] = domain["url"]
+        data["token"] = parser.getToken()
+        session.post(domain["url"], headers=headers, data=data)
+
+    timestampedPrint("Appended DNS records")
+
+
+def main():
+    currentIp = json.loads(requests.get(
+        "https://api.ipify.org?format=json", timeout=1).text)
+    session = doLogin()
+    domains = getDomains(session)
+    removeRecords(session, domains)
+    appendRecords(session, domains, currentIp)
+    timestampedPrint("Done")
+
+
+if __name__ == '__main__':
+    main()
